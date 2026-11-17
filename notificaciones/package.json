@@ -1,0 +1,6 @@
+{
+  "name": "mis-gestiones-avisos",
+  "private": true,
+  "description": "Envía las notificaciones de MIS GESTIONES desde GitHub Actions",
+  "dependencies": { "firebase-admin": "^12.7.0" }
+}
