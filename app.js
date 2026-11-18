@@ -381,7 +381,9 @@
     if (b.lecturaPda) {
       var lp = b.lecturaPda;
       lect = '<div class="lectura" role="status">' + (lp.valor != null ? 'He leído ' + euros(lp.valor) + ' en la foto de la PDA. Compruébalo:' : 'No he podido leer el importe. Escríbelo a mano mirando la foto:') +
-        (lp.recorte ? '<img src="' + lp.recorte + '" alt="Importe recortado de la foto de la PDA">' : '') + '</div>';
+        (lp.recorte ? '<img src="' + lp.recorte + '" alt="Importe recortado de la foto de la PDA">' : '') +
+        (lp.foto ? '<details><summary style="cursor:pointer">Ver la foto entera</summary><img data-foto="' + esc(lp.foto) + '" alt="Foto de la PDA" style="margin-top:8px"></details>' : '') +
+        (lp.valor == null ? '<span style="font-weight:500">Consejo: haz la foto de cerca, recta y sin reflejos, con el número «Cobrados a contado» bien visible.</span>' : '') + '</div>';
     }
     var lista = avisos();
     return '<header class="top alto"><div class="marca"><span>MIS GESTIONES</span><span style="display:flex;align-items:center;gap:10px">' + reloj() + avatar(40) + '</span></div>' +
@@ -623,11 +625,12 @@
       im.src = u;
     });
   }
+  // gris = lienzo para el lector: se amplía si la foto es pequeña (hasta 3 veces)
   function lienzo(im, maxLado, gris) {
-    var esc_ = Math.min(1, maxLado / Math.max(im.naturalWidth || im.width, im.naturalHeight || im.height));
+    var esc_ = Math.min(gris ? 3 : 1, maxLado / Math.max(im.naturalWidth || im.width, im.naturalHeight || im.height));
     var w = Math.round((im.naturalWidth || im.width) * esc_), h = Math.round((im.naturalHeight || im.height) * esc_);
     var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-    var cx = cv.getContext('2d'); cx.drawImage(im, 0, 0, w, h);
+    var cx = cv.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(im, 0, 0, w, h);
     if (gris) {
       var d = cx.getImageData(0, 0, w, h), px = d.data, hist = new Array(256).fill(0);
       for (var i = 0; i < px.length; i += 4) { var g = Math.round(px[i] * .299 + px[i + 1] * .587 + px[i + 2] * .114); px[i] = g; hist[g]++; }
@@ -673,32 +676,97 @@
       return t;
     });
   }
+  // Recorta un trozo del lienzo, lo amplía y lo pasa a gris con contraste
+  function recortar(cv, x0, y0, x1, y1, k, suave) {
+    x0 = Math.max(0, Math.round(x0)); y0 = Math.max(0, Math.round(y0)); x1 = Math.min(cv.width, Math.round(x1)); y1 = Math.min(cv.height, Math.round(y1));
+    if (x1 - x0 < 8 || y1 - y0 < 8) return null;
+    var cr = document.createElement('canvas'); cr.width = (x1 - x0) * k; cr.height = (y1 - y0) * k;
+    var cx = cr.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(cv, x0, y0, x1 - x0, y1 - y0, 0, 0, cr.width, cr.height);
+    // Contraste propio del trozo: el número de la PDA es gris claro sobre blanco
+    var d = cx.getImageData(0, 0, cr.width, cr.height), px = d.data, hist = new Array(256).fill(0), tot = cr.width * cr.height;
+    for (var i = 0; i < px.length; i += 4) hist[px[i]]++;
+    var acc = 0, lo = 0, hi = 255;
+    for (i = 0; i < 256; i++) { acc += hist[i]; if (acc > tot * .01) { lo = i; break; } }
+    acc = 0; for (i = 255; i >= 0; i--) { acc += hist[i]; if (acc > tot * (suave ? .01 : .5)) { hi = i; break; } }
+    var rango = Math.max(1, hi - lo);
+    for (i = 0; i < px.length; i += 4) { var v = Math.max(0, Math.min(255, Math.round((px[i] - lo) * 255 / rango))); px[i] = px[i + 1] = px[i + 2] = v; }
+    cx.putImageData(d, 0, 0);
+    return cr;
+  }
+  function conLimite(p, ms) { return Promise.race([p, new Promise(function (_, ko) { setTimeout(function () { ko(new Error('el lector tardó demasiado')); }, ms); })]); }
   function leerFotoPda(file) {
     var id = 'p' + Date.now(), w, cv;
-    return cargarImagen(file).then(function (im) {
+    var reImporte = /\d{1,4}\s*[,.]\s*\d{2}/;
+    // Lee el importe de un trozo con tres modos del lector y vota cifra a cifra
+    function leerTrozo(cr) {
+      if (!cr) return Promise.resolve(null);
+      var lecturas = [];
+      function modo(psm) {
+        return w.setParameters({ tessedit_pageseg_mode: psm, tessedit_char_whitelist: '0123456789,.€' }).then(function () { return w.recognize(cr); }).then(function (r) {
+          var dig = (r.data.text || '').replace(/[^0-9]/g, '');
+          if (dig.length >= 3 && dig.length <= 7) lecturas.push(dig);
+        });
+      }
+      return modo('7').then(function () { return modo('8'); }).then(function () { return modo('13'); }).then(function () {
+        if (!lecturas.length) return null;
+        var porLargo = {};
+        lecturas.forEach(function (d) { (porLargo[d.length] = porLargo[d.length] || []).push(d); });
+        var grupo = Object.keys(porLargo).map(function (k) { return porLargo[k]; }).sort(function (a, b) { return b.length - a.length; })[0];
+        var res = '';
+        for (var k = 0; k < grupo[0].length; k++) {
+          var cuenta = {};
+          grupo.forEach(function (d) { cuenta[d[k]] = (cuenta[d[k]] || 0) + 1; });
+          res += Object.keys(cuenta).sort(function (a, b) { return cuenta[b] - cuenta[a]; })[0];
+        }
+        return Math.round(parseInt(res, 10)) / 100;
+      });
+    }
+    var trabajo = cargarImagen(file).then(function (im) {
       return Promise.all([aBlob(lienzo(im, 1100, false), .6).then(function (b) { return fotoGuardar(id, b); }), prepararLector().then(function (x) { w = x; cv = lienzo(im, 2000, true); })]);
     }).then(function () {
       ocupado('Leyendo la PDA', 'Buscando «Cobrados a contado»…', .3);
       return w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' }).then(function () { return w.recognize(cv); });
     }).then(function (res) {
       var lineas = res.data.lines || [];
-      var iCont = -1;
-      lineas.forEach(function (l, n) { if (iCont < 0 && /contado/i.test(l.text)) iCont = n; });
-      var cand = null;
-      var re = /\d+\s*[,.]\s*\d{2}/;
-      for (var n = (iCont >= 0 ? iCont : 0); n < lineas.length && !cand; n++) if (re.test(lineas[n].text)) cand = lineas[n];
-      if (!cand) for (n = 0; n < lineas.length && !cand; n++) if (re.test(lineas[n].text)) cand = lineas[n];
-      if (!cand) return { valor: null, recorte: null, foto: id };
-      var b = cand.bbox, pad = Math.round((b.y1 - b.y0) * .5);
-      var x0 = Math.max(0, b.x0 - pad), y0 = Math.max(0, b.y0 - pad), x1 = Math.min(cv.width, b.x1 + pad), y1 = Math.min(cv.height, b.y1 + pad);
-      var cr = document.createElement('canvas'), k = 3; cr.width = (x1 - x0) * k; cr.height = (y1 - y0) * k;
-      var cx = cr.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(cv, x0, y0, x1 - x0, y1 - y0, 0, 0, cr.width, cr.height);
-      var recorte = cr.toDataURL('image/jpeg', .85);
-      return w.setParameters({ tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789,.€' }).then(function () { return w.recognize(cr); }).then(function (r2_) {
-        var v = L.importePda(r2_.data.text.replace(/\./g, ',')); if (v == null) v = L.importePda(cand.text);
-        return { valor: v, recorte: recorte, foto: id };
-      });
-    }).then(function (x) { ocupado(null); return w.setParameters({ tessedit_char_whitelist: '' }).then(function () { return x; }); });
+      var tit = null;
+      lineas.forEach(function (l) { if (!tit && /contad|cobrad/i.test(l.text)) tit = l; });
+      var intentos = [];
+      // 1) La línea con importe que va justo debajo del título
+      var desde = tit ? lineas.indexOf(tit) : 0;
+      for (var n = desde; n < lineas.length; n++) if (reImporte.test(lineas[n].text) || (tit && n > desde && /\d{3,}/.test(lineas[n].text))) { var b = lineas[n].bbox, h = b.y1 - b.y0; intentos.push({ cr: recortar(cv, b.x0 - h, b.y0 - h * .6, b.x1 + h, b.y1 + h * .6, 3), txt: lineas[n].text }); break; }
+      // 2) La zona debajo del título, aunque el lector no haya visto números
+      if (tit) { var t = tit.bbox, th = t.y1 - t.y0; intentos.push({ cr: recortar(cv, t.x0 - th * 3, t.y1 + th * .2, t.x1 + th, t.y1 + th * 3, 3) }); }
+      // 3) El centro de la pantalla (donde sale la ventanita)
+      intentos.push({ cr: recortar(cv, cv.width * .08, cv.height * .38, cv.width * .92, cv.height * .62, cv.width < 1400 ? 2 : 1, true), centro: true });
+      var i = 0, recorteMostrar = null;
+      function siguiente() {
+        if (i >= intentos.length) return { valor: null, recorte: recorteMostrar, foto: id };
+        var it = intentos[i++];
+        if (!it.cr) return siguiente();
+        if (!recorteMostrar) recorteMostrar = it.cr.toDataURL('image/jpeg', .85);
+        var p = it.centro
+          ? w.setParameters({ tessedit_pageseg_mode: '11', tessedit_char_whitelist: '' }).then(function () { return w.recognize(it.cr); }).then(function (r) {
+              var ls = r.data.lines || [], cand = null, tt = null;
+              ls.forEach(function (l) { if (!tt && /contad|cobrad/i.test(l.text)) tt = l; });
+              for (var k = tt ? ls.indexOf(tt) : 0; k < ls.length && !cand; k++) if (reImporte.test(ls[k].text) || (tt && k > ls.indexOf(tt) && /\d{3,}/.test(ls[k].text))) cand = ls[k];
+              if (!cand && tt) {
+                var q = tt.bbox, qh = q.y1 - q.y0, debajo = recortar(it.cr, q.x0 - qh * 3, q.y1 + qh * .1, q.x1, q.y1 + qh * 2.6, 2);
+                if (debajo) recorteMostrar = debajo.toDataURL('image/jpeg', .85);
+                return leerTrozo(debajo);
+              }
+              if (!cand) return null;
+              var bb = cand.bbox, hh = bb.y1 - bb.y0, sub = recortar(it.cr, bb.x0 - hh, bb.y0 - hh * .6, bb.x1 + hh, bb.y1 + hh * .6, 2);
+              if (sub) recorteMostrar = sub.toDataURL('image/jpeg', .85);
+              return leerTrozo(sub).then(function (v) { return v != null ? v : L.importePda(cand.text); });
+            })
+          : leerTrozo(it.cr).then(function (v) { return v != null ? v : (it.txt ? L.importePda(it.txt) : null); });
+        return p.then(function (v) { if (v != null && v > 0) { if (!it.centro) recorteMostrar = it.cr.toDataURL('image/jpeg', .85); return { valor: v, recorte: recorteMostrar, foto: id }; } return siguiente(); });
+      }
+      return siguiente();
+    });
+    return conLimite(trabajo, 120000).then(function (x) {
+      ocupado(null); return w.setParameters({ tessedit_char_whitelist: '', tessedit_pageseg_mode: '3' }).then(function () { return x; }, function () { return x; });
+    }, function (e) { ocupado(null); if (w) w.setParameters({ tessedit_char_whitelist: '', tessedit_pageseg_mode: '3' }).catch(function () {}); return { valor: null, recorte: null, foto: id, error: e && e.message }; });
   }
 
   /* ================= documentos de SEUR ================= */
@@ -1011,6 +1079,7 @@
       auth.signOut(); toast('Esta app es solo para ' + self.CORREO_DUENO + '.'); return;
     }
     usuario = u || null;
+    modoLogin = 'login';
     escuchas.forEach(function (f) { f(); }); escuchas = [];
     urlsFotos = {};
     if (usuario) escuchar();
