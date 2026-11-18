@@ -374,6 +374,7 @@
       return '<div class="ticket">' + (t.foto ? '<img alt="Foto del ticket" data-foto="' + esc(t.foto) + '">' : '<span class="mini" aria-hidden="true"></span>') +
         '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;font-weight:700">Ticket: ' + euros(t.total) + '</span>' +
         '<span style="font-size:12px">Billetes ' + euros(t.billetes || 0) + (t.sobre ? ' + sobre ' + euros(t.sobre) : ' · sin sobre') + (t.op ? ' · Op. ' + esc(t.op) : '') + (t.hora ? ' · ' + esc(t.hora) : '') + '</span></div>' +
+        '<button type="button" class="icobtn" data-a="editarTicket" data-n="' + n + '" aria-label="Corregir este ticket">' + I.hoy.replace(/24/g, '18') + '</button>' +
         '<button type="button" class="icobtn" data-a="quitarTicket" data-n="' + n + '" aria-label="Quitar este ticket">' + I.borrar + '</button></div>';
     }).join('');
     var lect = '';
@@ -752,15 +753,17 @@
     var d = { paquetes: b.paquetes || 0, cobrado: r2(b.cobrado || 0), tickets: b.tickets, pda: b.pda || null, guardado: new Date().toISOString() };
     db.dias[ui.fecha] = d; guardar();
   }
-  function opRepetido(op) {
-    if (!op) return null;
+  // Un ticket repetido = mismo nº de operación, mismo día y misma hora (la máquina reinicia los números)
+  function opRepetido(nuevo) {
+    if (!nuevo.op) return null;
+    function igual(t) { return t.op === nuevo.op && (t.fecha || null) === (nuevo.fecha || null) && (t.hora || null) === (nuevo.hora || null); }
     var dias = Object.keys(db.dias);
-    for (var i = 0; i < dias.length; i++) if ((db.dias[dias[i]].tickets || []).some(function (t) { return t.op === op; })) return dias[i];
-    if (ui.borrador && ui.borrador.tickets.some(function (t) { return t.op === op; })) return ui.fecha;
+    for (var i = 0; i < dias.length; i++) if ((db.dias[dias[i]].tickets || []).some(igual)) return dias[i];
+    if (ui.borrador && ui.borrador.tickets.some(igual)) return ui.fecha;
     return null;
   }
   function anadirTicket(t) {
-    var rep = opRepetido(t.op);
+    var rep = opRepetido(t);
     if (rep) { toast('Ese ticket (Op. ' + t.op + ') ya está apuntado el ' + larga(rep) + '.'); return; }
     if (t.fecha && t.fecha !== ui.fecha) {
       ui.ticketPendiente = t;
@@ -788,6 +791,20 @@
           '<div class="campo"><label for="mO">Nº de operación (opcional)</label><input id="mO" class="txt peq num" inputmode="numeric"></div>' +
           '<div class="g2"><button type="button" class="btn sec" data-a="cerrarModal">Cancelar</button><button type="button" class="btn rojo" data-a="ticketManoOk">Añadir</button></div>');
         setTimeout(function () { var x = $('#mB'); if (x) x.focus(); }, 30);
+        break;
+      case 'editarTicket':
+        var te = b.tickets[+el.getAttribute('data-n')];
+        ui.editando = +el.getAttribute('data-n');
+        modal('Corregir ticket', '<h2>Corregir el ticket</h2><p class="vacio" style="padding:0">Cambia lo que no se haya leído bien.</p>' +
+          '<div class="campo"><label for="eB">Billetes</label><input id="eB" class="txt peq num" inputmode="decimal" value="' + campoEuros(te.billetes) + '"></div>' +
+          '<div class="campo"><label for="eS">Sobre (efectivo introducido manualmente)</label><input id="eS" class="txt peq num" inputmode="decimal" placeholder="0,00" value="' + campoEuros(te.sobre) + '"></div>' +
+          '<div class="g2"><button type="button" class="btn sec" data-a="cerrarModal">Cancelar</button><button type="button" class="btn rojo" data-a="editarTicketOk">Guardar</button></div>');
+        break;
+      case 'editarTicketOk':
+        var tk = b.tickets[ui.editando], nb = aNum($('#eB').value), ns = aNum($('#eS').value);
+        if (nb + ns <= 0) { toast('Escribe al menos un importe.'); return; }
+        tk.billetes = nb; tk.sobre = ns; tk.total = r2(nb + ns); tk.corregido = true; ui.sucio = true;
+        modal(null); pintar(); toast('Ticket corregido: ' + euros(tk.total) + '. Recuerda guardar el día.');
         break;
       case 'ticketManoOk':
         var bi = aNum($('#mB').value), so = aNum($('#mS').value), op = ($('#mO').value || '').trim() || null;

@@ -143,37 +143,68 @@
   }
 
   /* ---------- Ticket de Prosegur ---------- */
+  // Tolera los fallos típicos del lector: "Tota1", "Tota)", basura al principio de línea, coma o punto.
+  var IMP = '(\\d{1,5}\\s?[.,]\\s?\\d{2})';
+  function imp(s) { return num(String(s).replace(/\s/g, '')); }
   function leerTicket(texto) {
     var t = texto.replace(/\r/g, '');
+    var lineas = t.split('\n');
     var res = { fecha: null, hora: null, op: null, billetes: null, sobre: null, total: null };
     var mf = /(\d{2})\/(\d{2})\/(\d{4})\s*,?\s*(\d{1,2}:\d{2})?/.exec(t);
     if (mf) { res.fecha = mf[3] + '-' + mf[2] + '-' + mf[1]; res.hora = mf[4] || null; }
-    var mo = /Op\.?\s*N[uú]m[^:\d]*:?\s*(\d{2,})/i.exec(t);
+    var mo = /Op\.?\s*N[uúü]m[^:\d\n]*:?\s*(\d{1,})/i.exec(t);
     if (mo) res.op = mo[1];
-    var mb = /Billetes[^\n]*?(\d+[.,]\d{2})/i.exec(t);
-    if (mb) res.billetes = num(mb[1]);
-    var lineas = t.split('\n');
-    for (var i = 0; i < lineas.length; i++) {
-      if (/manualmente|sobre/i.test(lineas[i])) {
-        for (var j = i; j < Math.min(lineas.length, i + 6); j++) {
-          var ms = /^\s*Total\s+(\d+[.,]\d{2})\s*EUR/i.exec(lineas[j]);
-          if (ms) { res.sobre = num(ms[1]); break; }
-        }
-        if (res.sobre != null) break;
+
+    // Total de la transacción (puede venir en la línea siguiente)
+    for (var i = 0; i < lineas.length && res.total == null; i++) {
+      if (/transacc/i.test(lineas[i])) {
+        var m = new RegExp(IMP).exec(lineas[i].split(/transacc\S*/i)[1] || '');
+        if (!m && lineas[i + 1]) m = new RegExp(IMP).exec(lineas[i + 1]);
+        if (!m && lineas[i + 2]) m = new RegExp(IMP).exec(lineas[i + 2]);
+        if (m) res.total = imp(m[1]);
       }
     }
-    var mt = /Total\s+de\s+transacci[oóò]n\s*\n?\s*(\d+[.,]\d{2})/i.exec(t);
-    if (mt) res.total = num(mt[1]);
-    if (res.billetes == null) {
-      var mtb = /^\s*Total\s+\d+\s+(\d+[.,]\d{2})\s*EUR/im.exec(t);
-      if (mtb) res.billetes = num(mtb[1]);
+    // Billetes: línea "Billetes 28 600.00 EUR" o "Total 28 600.00 EUR" (antes del sobre)
+    var iManual = -1;
+    for (i = 0; i < lineas.length; i++) if (iManual < 0 && /manual|introducid|identificad|sobre:/i.test(lineas[i])) iManual = i;
+    var hastaManual = iManual >= 0 ? iManual : lineas.length;
+    for (i = 0; i < hastaManual && res.billetes == null; i++) {
+      if (/b[il1|!]{1,2}[l1|i]?[e3]t[e3]s/i.test(lineas[i])) { var mb = new RegExp(IMP + '\\s*E', 'i').exec(lineas[i]) || new RegExp(IMP).exec(lineas[i]); if (mb) res.billetes = imp(mb[1]); }
     }
-    if (res.total == null && (res.billetes != null || res.sobre != null)) res.total = r2((res.billetes || 0) + (res.sobre || 0));
-    if (res.total != null && res.billetes == null && res.sobre != null) res.billetes = r2(res.total - res.sobre);
-    if (res.total != null && res.billetes == null && res.sobre == null) res.billetes = res.total;
-    if (res.total != null && res.billetes != null && res.sobre == null && Math.abs(res.total - res.billetes) > 0.004) res.sobre = r2(res.total - res.billetes);
-    if (res.sobre == null && res.billetes != null) res.sobre = 0;
-    res.cuadra = res.total != null && Math.abs(r2((res.billetes || 0) + (res.sobre || 0)) - res.total) < 0.005;
+    for (i = 0; i < hastaManual && res.billetes == null; i++) {
+      var mtb = new RegExp('Tota[l1I|)]\\s+\\d{1,3}\\s+' + IMP, 'i').exec(lineas[i]);
+      if (mtb) res.billetes = imp(mtb[1]);
+    }
+    if (res.billetes == null) {
+      // Suma de las líneas "50.00 X 7 350.00 EUR"
+      var suma = 0, hay = false;
+      for (i = 0; i < hastaManual; i++) {
+        var md = new RegExp('\\d+[.,]\\d{2}\\s*[xX×]\\s*\\d+\\S*\\s+' + IMP).exec(lineas[i]);
+        if (md) { suma += imp(md[1]); hay = true; }
+      }
+      if (hay) res.billetes = r2(suma);
+    }
+    // Sobre (efectivo introducido manualmente): primer importe tras esa línea que no sea el total de la transacción
+    if (iManual >= 0) {
+      for (i = iManual; i < Math.min(lineas.length, iManual + 7); i++) {
+        if (/transacc/i.test(lineas[i])) break;
+        if (/identificad|introducid/i.test(lineas[i])) continue;
+        var ms = new RegExp(IMP + '\\s*E', 'i').exec(lineas[i]) || (/tota/i.test(lineas[i]) && new RegExp(IMP).exec(lineas[i]));
+        if (ms) { res.sobre = imp(ms[1]); break; }
+      }
+    }
+    // Cuadrar las tres cifras: si una falta o no encaja, se deduce de las otras dos
+    var B = res.billetes, S = res.sobre, T = res.total;
+    if (T != null && B != null && S != null && Math.abs(r2(B + S) - T) > 0.004) {
+      if (B <= T) S = r2(T - B);
+    }
+    if (T != null && B != null && S == null) S = Math.abs(T - B) > 0.004 && B < T ? r2(T - B) : 0;
+    if (T != null && B == null && S != null) B = r2(T - S);
+    if (T == null && B != null) T = r2(B + (S || 0));
+    if (T != null && B == null && S == null) { B = T; S = 0; }
+    if (S == null && B != null) S = 0;
+    res.billetes = B; res.sobre = S; res.total = T;
+    res.cuadra = T != null && Math.abs(r2((B || 0) + (S || 0)) - T) < 0.005;
     return res;
   }
 
